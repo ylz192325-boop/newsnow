@@ -35,7 +35,7 @@
 
 ## 微信早报
 
-支持使用 GitHub Actions 每天北京时间 09:00 通过 PushPlus 向个人微信发送新闻汇总。配置和验证步骤见 [微信早报接入文档](docs/wechat-digest.zh-CN.md)。
+支持使用 GitHub Actions 每天北京时间 09:00 通过 PushPlus 向个人微信发送新闻汇总。默认包含澎湃新闻、华尔街见闻、财联社电报、IT之家、Polymarket、Hacker News、环球网、Bloomberg、掘金、GeekNews，每来源最多 20 条；来源内去重，保留跨来源归属，内容过长时分段发送。配置和验证步骤见 [微信早报接入文档](docs/wechat-digest.zh-CN.md)。
 
 ## 部署指南
 

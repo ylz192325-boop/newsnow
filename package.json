@@ -25,7 +25,7 @@
     "test": "vitest -c vitest.config.ts",
     "digest": "node scripts/wechat-digest.mjs",
     "digest:preview": "node scripts/wechat-digest.mjs --dry-run",
-    "test:digest": "vitest -c vitest.config.ts run test/wechat-digest.test.mjs"
+    "test:digest": "vitest -c vitest.config.ts run test/wechat-digest.test.mjs test/wechat-digest-sources.test.mjs"
   },
   "dependencies": {
     "@atlaskit/pragmatic-drag-and-drop": "^1.7.7",
