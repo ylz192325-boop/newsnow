@@ -12,15 +12,16 @@ const json = data => ({ ok: true, status: 200, json: async () => data })
 const env = { NEWSNOW_SOURCES: "thepaper,ithome", PUSHPLUS_TOKEN: "test-private-token" }
 
 it("configuration uses local API and validates source IDs, URL and limits", () => {
-  assert.deepEqual(readConfig({}).sources, ["thepaper", "wallstreetcn-news", "cls-telegraph", "ithome"])
+  assert.deepEqual(readConfig({}).sources, ["thepaper", "wallstreetcn-news", "cls-telegraph", "ithome", "polymarket", "hackernews", "huanqiu", "bloomberg", "juejin", "geeknews"])
   assert.equal(readConfig({}).baseUrl, "http://127.0.0.1:3000/")
-  assert.equal(readConfig({}).itemsPerSource, 5)
+  assert.equal(readConfig({}).itemsPerSource, 20)
+  assert.equal(readConfig({ DIGEST_ITEMS_PER_SOURCE: "20" }).itemsPerSource, 20)
   assert.deepEqual(readConfig({ NEWSNOW_BASE_URL: "", NEWSNOW_SOURCES: "", DIGEST_ITEMS_PER_SOURCE: "" }), readConfig({}))
   assert.deepEqual(readConfig({ NEWSNOW_SOURCES: "ithome,ithome" }).sources, ["ithome"])
   for (const value of ["unknown", "../thepaper", "thepaper,"]) {
     assert.throws(() => readConfig({ NEWSNOW_SOURCES: value }), /NEWSNOW_SOURCES/)
   }
-  for (const value of ["0", "11", "NaN", "1.5"]) {
+  for (const value of ["0", "21", "NaN", "1.5"]) {
     assert.throws(() => readConfig({ DIGEST_ITEMS_PER_SOURCE: value }), /DIGEST_ITEMS_PER_SOURCE/)
   }
   for (const value of ["javascript:alert(1)", "https://private:secret@example.com", "not a URL"]) {
@@ -28,19 +29,20 @@ it("configuration uses local API and validates source IDs, URL and limits", () =
   }
 })
 
-it("news GET requests use the API contract, preserve source order, and deduplicate title or URL", async () => {
+it("news GET requests preserve source order and deduplicate within each source while retaining attribution across sources", async () => {
   const calls = []
   const fetchImpl = async (url, options) => {
     calls.push({ url: String(url), options })
     if (new URL(url).searchParams.get("id") === "thepaper") {
-      return json(response([item("同一新闻", "https://example.com/1"), item("另一新闻", "https://example.com/2")]))
+      return json(response([item("同一新闻", "https://example.com/1"), item("另一新闻", "https://example.com/2"), item("同一新闻", "https://example.com/duplicate"), item("重复地址", "https://example.com/2")]))
     }
     return json(response([item(" 同一新闻 ", "https://example.com/3"), item("同一地址", "https://example.com/2"), item("科技新闻", "https://example.com/4")]))
   }
   const result = await runDigest({ env, now, fetchImpl, dryRun: true })
-  assert.equal(result.itemCount, 3)
+  assert.equal(result.itemCount, 5)
+  assert.deepEqual(result.sourceCounts, { thepaper: 2, ithome: 3 })
   assert.ok(result.content.indexOf("澎湃新闻") < result.content.indexOf("IT之家"))
-  assert.equal((result.content.match(/同一新闻/g) || []).length, 1)
+  assert.equal((result.content.match(/同一新闻/g) || []).length, 2)
   assert.equal(calls.length, 2)
   for (const call of calls) {
     const url = new URL(call.url)
@@ -90,7 +92,8 @@ it("untrusted titles and descriptions are escaped; unsafe links fall back or are
     item("带凭证地址", "https://user:password@example.com"),
   ]
   const result = await runDigest({ env, now, dryRun: true, fetchImpl: async () => json(response(items)) })
-  assert.equal(result.itemCount, 2)
+  assert.equal(result.itemCount, 4)
+  assert.deepEqual(result.sourceCounts, { thepaper: 2, ithome: 2 })
   assert.match(result.content, /&lt;img/)
   assert.match(result.content, /&lt;script&gt;/)
   assert.match(result.content, /href="https:\/\/example.com\/\?a=1&amp;b=2"/)
@@ -98,19 +101,34 @@ it("untrusted titles and descriptions are escaped; unsafe links fall back or are
   assert.doesNotMatch(result.content, /<img|<script>|javascript:|password|恶意地址/)
 })
 
-it("per-source counts, long fields, and total HTML stay below PushPlus limits", async () => {
+it("all 20 selected entries per source survive long fields by splitting below the PushPlus limit", async () => {
   const longItems = Array.from({ length: 30 }, (_, index) => ({ ...item(`新闻${index}${"&".repeat(1000)}`, `https://example.com/${index}?q=${"x".repeat(1700)}`), extra: { hover: "<".repeat(500) } }))
-  const result = await runDigest({ env: { ...env, DIGEST_ITEMS_PER_SOURCE: "10" }, now, dryRun: true, fetchImpl: async () => json(response(longItems)) })
-  assert.ok(result.content.length <= MAX_CONTENT_LENGTH)
-  assert.ok(result.title.length <= 100)
-  assert.ok(result.itemCount > 0 && result.itemCount <= 10)
-  assert.match(result.content, /篇幅限制/)
+  const result = await runDigest({ env, now, dryRun: true, fetchImpl: async () => json(response(longItems)) })
+  assert.equal(result.itemCount, 40)
+  assert.deepEqual(result.sourceCounts, { thepaper: 20, ithome: 20 })
+  assert.ok(result.messages.length > 1)
+  assert.equal(result.messages.reduce((sum, message) => sum + message.itemCount, 0), 40)
+  const nextOrdinal = new Map()
+  for (const message of result.messages) {
+    assert.ok(message.content.length <= MAX_CONTENT_LENGTH)
+    assert.ok(message.title.length <= 100)
+    assert.equal((message.content.match(/<ol\b/g) || []).length, (message.content.match(/<\/ol>/g) || []).length)
+    assert.equal((message.content.match(/<li>/g) || []).length, message.itemCount)
+    for (const section of message.content.matchAll(/<h2>(.*?)<\/h2><p>.*?<\/p><ol start="(\d+)">([\s\S]*?)<\/ol>/g)) {
+      const [, name, start, entries] = section
+      assert.equal(Number(start), nextOrdinal.get(name) || 1)
+      nextOrdinal.set(name, Number(start) + (entries.match(/<li>/g) || []).length)
+    }
+  }
+  assert.equal(nextOrdinal.size, 2)
+  assert.ok([...nextOrdinal.values()].every(ordinal => ordinal === 21))
+  assert.doesNotMatch(result.content, /因篇幅限制省略/)
   assert.ok(!result.content.includes("&lt;".repeat(121)))
   const shortResult = await runDigest({ env: { ...env, NEWSNOW_SOURCES: "thepaper", DIGEST_ITEMS_PER_SOURCE: "2" }, now, dryRun: true, fetchImpl: async () => json(response(longItems.map((_, index) => item(`新闻${index}`, `https://example.com/${index}`)))) })
   assert.equal(shortResult.itemCount, 2)
 })
 
-it("news omitted for length do not suppress a shorter same-title item from a later source", async () => {
+it("long earlier sources never exclude later sources or the same story under another source", async () => {
   const fillers = Array.from({ length: 5 }, (_, index) => ({
     ...item(`填充${index}${"&".repeat(180)}`, `https://example.com/${index}?q=${"x".repeat(1900)}`),
     extra: { hover: "<".repeat(120) },
@@ -122,12 +140,12 @@ it("news omitted for length do not suppress a shorter same-title item from a lat
       : [item(omittedTitle, "https://example.com/short")]
     return json(response(items))
   }
-  const result = await runDigest({ env: { ...env, DIGEST_ITEMS_PER_SOURCE: "10" }, now, dryRun: true, fetchImpl })
-  assert.match(result.content, /篇幅限制/)
-  assert.ok(result.content.includes("href=\"https://example.com/short\""), "The shorter later-source item should remain visible after truncation")
-  assert.equal((result.content.match(new RegExp(omittedTitle, "g")) || []).length, 1)
-  assert.equal(result.itemCount, 6)
-  assert.ok(result.content.length <= MAX_CONTENT_LENGTH)
+  const result = await runDigest({ env, now, dryRun: true, fetchImpl })
+  assert.ok(result.content.includes("href=\"https://example.com/short\""), "The later source must remain represented")
+  assert.equal((result.content.match(new RegExp(omittedTitle, "g")) || []).length, 2)
+  assert.equal(result.itemCount, 7)
+  assert.deepEqual(result.sourceCounts, { thepaper: 6, ithome: 1 })
+  assert.ok(result.messages.every(message => message.content.length <= MAX_CONTENT_LENGTH))
 })
 
 it("preview needs no token, writes HTML, and never makes a POST request", async () => {
@@ -144,7 +162,7 @@ it("preview needs no token, writes HTML, and never makes a POST request", async 
     assert.match(preview, /<html lang="zh-CN">/)
     assert.match(preview, /<meta charset="UTF-8">/)
     assert.match(preview, /<meta name="viewport"/)
-    assert.ok(preview.includes(`<body><main>${result.content}</main></body>`))
+    assert.ok(result.messages.every(message => preview.includes(message.content)))
     assert.match(preview, /今日新闻/)
     assert.doesNotMatch(result.content, /<!doctype|<meta|<style/i)
     assert.deepEqual(calls, ["GET"])
@@ -152,6 +170,55 @@ it("preview needs no token, writes HTML, and never makes a POST request", async 
   } finally {
     await rm(directory, { recursive: true })
   }
+})
+
+it("ten sources retain 200 items and preview matches every sequential POST payload", async () => {
+  const ids = ["thepaper", "wallstreetcn-news", "cls-telegraph", "ithome", "hackernews", "juejin", "solidot", "zhihu", "weibo", "baidu"]
+  const expandedEnv = { ...env, NEWSNOW_SOURCES: ids.join(",") }
+  const posts = []
+  const fetchImpl = async (url, options) => {
+    if (options.method === "POST") {
+      posts.push(JSON.parse(options.body))
+      return json({ code: 200 })
+    }
+    const id = new URL(url).searchParams.get("id")
+    return json(response(Array.from({ length: 30 }, (_, index) => ({
+      ...item(`${id} news ${index} ${"&".repeat(80)}`, `https://example.com/${id}/${index}?q=${"x".repeat(500)}`),
+      extra: { hover: "<".repeat(120) },
+    }))))
+  }
+  const preview = await runDigest({ env: expandedEnv, now, dryRun: true, fetchImpl })
+  assert.equal(posts.length, 0)
+  assert.equal(preview.itemCount, 200)
+  assert.ok(ids.every(id => preview.sourceCounts[id] === 20))
+  assert.ok(preview.messages.length > 1)
+  const sent = await runDigest({ env: expandedEnv, now, fetchImpl })
+  assert.equal(posts.length, preview.messages.length)
+  assert.equal(sent.acceptedParts, posts.length)
+  posts.forEach((post, index) => {
+    assert.equal(post.title, preview.messages[index].title)
+    assert.equal(post.content, preview.messages[index].content)
+    assert.ok(post.content.length <= MAX_CONTENT_LENGTH)
+    assert.match(post.title, new RegExp(`${index + 1}/${posts.length}$`))
+  })
+})
+
+it("a failed second part stops immediately without retrying accepted parts or sending later parts", async () => {
+  let posts = 0
+  await assert.rejects(runDigest({ env: { ...env, NEWSNOW_SOURCES: "thepaper" }, now, fetchImpl: async (_url, options) => {
+    if (options.method === "POST") {
+      posts += 1
+      return json({ code: posts === 1 ? 200 : 500, msg: env.PUSHPLUS_TOKEN })
+    }
+    return json(response(Array.from({ length: 20 }, (_, index) => item(`long ${index}`, `https://example.com/${index}?q=${"x".repeat(1800)}`))))
+  } }), (error) => {
+    assert.match(error.message, /PushPlus part 2\//)
+    assert.match(error.message, /1 part\(s\) accepted/)
+    assert.match(error.message, /Do not retry automatically/)
+    assert.ok(!error.message.includes(env.PUSHPLUS_TOKEN))
+    return true
+  })
+  assert.equal(posts, 2)
 })
 
 it("sending requires token before any request and uses the PushPlus JSON contract", async () => {
