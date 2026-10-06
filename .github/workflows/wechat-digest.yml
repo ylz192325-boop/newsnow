@@ -1,0 +1,120 @@
+name: Daily WeChat digest
+
+on:
+  schedule:
+    # GitHub cron uses UTC: 01:00 UTC = 09:00 Asia/Shanghai.
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview only; uncheck to send to WeChat
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-wechat-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Check receiving account configuration
+        if: github.event_name == 'schedule' || !inputs.dry_run
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          if [ -z "$PUSHPLUS_TOKEN" ]; then
+            echo 'Configure the PUSHPLUS_TOKEN repository secret before sending.' >&2
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test digest
+        run: pnpm test:digest
+
+      - name: Build NewsNow
+        run: pnpm build
+
+      - name: Start temporary NewsNow API
+        env:
+          HOST: 127.0.0.1
+          PORT: '3000'
+          NODE_ENV: production
+          ENABLE_CACHE: 'false'
+          INIT_TABLE: 'false'
+        run: |
+          node dist/output/server/index.mjs > "$RUNNER_TEMP/newsnow.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/newsnow.pid"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:3000/api/latest > /dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/newsnow.pid")" 2>/dev/null; then
+              echo 'NewsNow exited before becoming ready.' >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          echo 'NewsNow API startup timed out.' >&2
+          exit 1
+
+      - name: Preview digest
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        env:
+          NEWSNOW_BASE_URL: http://127.0.0.1:3000
+          NEWSNOW_SOURCES: ${{ vars.NEWSNOW_SOURCES }}
+          DIGEST_ITEMS_PER_SOURCE: ${{ vars.DIGEST_ITEMS_PER_SOURCE }}
+        run: pnpm digest:preview --output "$RUNNER_TEMP/digest.html"
+
+      - name: Send digest to PushPlus
+        if: github.event_name == 'schedule' || !inputs.dry_run
+        env:
+          NEWSNOW_BASE_URL: http://127.0.0.1:3000
+          NEWSNOW_SOURCES: ${{ vars.NEWSNOW_SOURCES }}
+          DIGEST_ITEMS_PER_SOURCE: ${{ vars.DIGEST_ITEMS_PER_SOURCE }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          pnpm digest
+          echo 'PushPlus accepted the request. Confirm receipt in WeChat; API acceptance does not confirm delivery.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save preview
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        uses: actions/upload-artifact@v4
+        with:
+          name: wechat-digest-preview
+          path: ${{ runner.temp }}/digest.html
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Show API diagnostics on failure
+        if: failure()
+        run: |
+          if [ -f "$RUNNER_TEMP/newsnow.log" ]; then
+            tail -n 60 "$RUNNER_TEMP/newsnow.log"
+          fi
+
+      - name: Stop temporary NewsNow API
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/newsnow.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/newsnow.pid")" 2>/dev/null || true
+          fi
