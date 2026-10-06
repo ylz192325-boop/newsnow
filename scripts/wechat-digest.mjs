@@ -3,10 +3,11 @@ import { writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
+import { EXTERNAL_SOURCES, fetchExternalSource } from "./wechat-digest-sources.mjs"
 
-const sourceRegistry = JSON.parse(readFileSync(new URL("../shared/sources.json", import.meta.url), "utf8"))
+const sourceRegistry = { ...JSON.parse(readFileSync(new URL("../shared/sources.json", import.meta.url), "utf8")), ...EXTERNAL_SOURCES }
 
-export const DEFAULT_SOURCES = ["thepaper", "wallstreetcn-news", "cls-telegraph", "ithome"]
+export const DEFAULT_SOURCES = ["thepaper", "wallstreetcn-news", "cls-telegraph", "ithome", "polymarket", "hackernews", "huanqiu", "bloomberg", "juejin", "geeknews"]
 export const MAX_CONTENT_LENGTH = 19_999
 const requestTimeout = 20_000
 const maxCacheAge = 86_400_000
@@ -29,9 +30,9 @@ export function readConfig(env = process.env) {
   if (sources.some(id => !/^[a-z0-9-]+$/.test(id) || !Object.hasOwn(sourceRegistry, id))) {
     throw new Error("NEWSNOW_SOURCES must contain known NewsNow source IDs, separated by commas.")
   }
-  const itemsPerSource = Number(env.DIGEST_ITEMS_PER_SOURCE || 5)
-  if (!Number.isInteger(itemsPerSource) || itemsPerSource < 1 || itemsPerSource > 10) {
-    throw new Error("DIGEST_ITEMS_PER_SOURCE must be an integer from 1 to 10.")
+  const itemsPerSource = Number(env.DIGEST_ITEMS_PER_SOURCE || 20)
+  if (!Number.isInteger(itemsPerSource) || itemsPerSource < 1 || itemsPerSource > 20) {
+    throw new Error("DIGEST_ITEMS_PER_SOURCE must be an integer from 1 to 20.")
   }
   return { baseUrl, sources, itemsPerSource }
 }
@@ -61,12 +62,17 @@ function formatDate(time, dateOnly = false) {
 
 async function fetchSource(id, config, fetchImpl, now) {
   try {
-    const url = new URL("/api/s", config.baseUrl)
-    url.searchParams.set("id", id)
-    url.searchParams.set("latest", "true")
-    const response = await fetchImpl(url, { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(requestTimeout) })
-    if (!response.ok) throw new Error("HTTP failure")
-    const data = await response.json()
+    let data
+    if (Object.hasOwn(EXTERNAL_SOURCES, id)) {
+      data = await fetchExternalSource(id, fetchImpl, now)
+    } else {
+      const url = new URL("/api/s", config.baseUrl)
+      url.searchParams.set("id", id)
+      url.searchParams.set("latest", "true")
+      const response = await fetchImpl(url, { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(requestTimeout) })
+      if (!response.ok) throw new Error("HTTP failure")
+      data = await response.json()
+    }
     if (!data || !["success", "cache"].includes(data.status) || !Array.isArray(data.items)
       || typeof data.updatedTime !== "number" || !Number.isFinite(data.updatedTime)
       || now - data.updatedTime > maxCacheAge || data.updatedTime > now + 300_000) {
@@ -88,49 +94,69 @@ async function fetchSource(id, config, fetchImpl, now) {
 function renderDigest(groups, config, now) {
   const title = `NewsNow 每日早报 · ${formatDate(now, true)}`
   const failedSources = groups.filter(group => group.failed).map(group => group.id)
-  const seenTitles = new Set()
-  const seenUrls = new Set()
-  let content = `<h1>${escapeHtml(title)}</h1><p>汇总时间：${formatDate(now)}（北京时间）。按来源当前列表整理；API 时间不是文章发布时间。</p>`
-  let itemCount = 0
-  let omitted = false
-  for (const group of groups.filter(group => !group.failed)) {
-    const selected = []
-    const selectedTitles = new Set()
-    const selectedUrls = new Set()
-    for (const item of group.items) {
-      if (seenTitles.has(item.title) || seenUrls.has(item.url) || selectedTitles.has(item.title) || selectedUrls.has(item.url)) continue
-      selectedTitles.add(item.title)
-      selectedUrls.add(item.url)
-      selected.push(item)
-      if (selected.length === config.itemsPerSource) break
-    }
-    if (!selected.length) continue
-    const heading = `<h2>${escapeHtml(sourceName(group.id))}</h2><p>${group.status === "cache" ? "缓存 · " : ""}API 时间：${formatDate(group.updatedTime)}（北京时间）</p><ol>`
-    let section = heading
-    let sectionCount = 0
-    for (const item of selected) {
-      const entry = `<li><a href="${escapeHtml(item.url)}">${escapeHtml(text(item.title, 180))}</a>${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}</li>`
-      // Reserve space for failure notices, closing tags, and the length notice.
-      if (content.length + section.length + entry.length + 2000 > MAX_CONTENT_LENGTH) {
-        omitted = true
-        continue
-      }
-      section += entry
-      sectionCount += 1
+  const selectedGroups = groups.map((group) => {
+    const items = []
+    const seenTitles = new Set()
+    const seenUrls = new Set()
+    for (const item of group.items || []) {
+      if (seenTitles.has(item.title) || seenUrls.has(item.url)) continue
       seenTitles.add(item.title)
       seenUrls.add(item.url)
+      items.push(item)
+      if (items.length === config.itemsPerSource) break
     }
-    if (sectionCount) {
-      content += `${section}</ol>`
-      itemCount += sectionCount
-    }
-  }
+    return { ...group, items }
+  })
+  const sourceCounts = Object.fromEntries(selectedGroups.map(group => [group.id, group.items.length]))
+  const itemCount = selectedGroups.reduce((sum, group) => sum + group.items.length, 0)
   if (!itemCount) throw new Error("No usable news was returned; nothing was sent.")
-  if (failedSources.length) content += `<p>以下来源暂不可用：${failedSources.map(id => escapeHtml(sourceName(id))).join("、")}。本次发送其余来源。</p>`
-  if (omitted) content += "<p>部分条目因篇幅限制省略。</p>"
-  content += "<p>由 NewsNow 汇总，点击标题阅读原文。</p>"
-  if (content.length > MAX_CONTENT_LENGTH) throw new Error("Digest exceeds the PushPlus content limit; nothing was sent.")
-  return { title, content, itemCount, failedSources }
+  const header = `<h1>${escapeHtml(title)}</h1><p>汇总时间：${formatDate(now)}（北京时间）。按来源当前列表整理；API 时间不是文章发布时间。</p>`
+  const footer = `${failedSources.length ? `<p>以下来源暂不可用：${failedSources.map(id => escapeHtml(sourceName(id))).join("、")}。本次发送其余来源。</p>` : ""}<p>由 NewsNow 汇总，点击标题阅读原文。</p>`
+  // Every part has at least one item, so itemCount bounds both pagination numbers.
+  const labelBudget = `<p>分段 ${itemCount}/${itemCount}</p>`.length
+  const bodyBudget = MAX_CONTENT_LENGTH - header.length - footer.length - labelBudget
+  const blocks = []
+  for (const group of selectedGroups.filter(group => group.items.length)) {
+    const heading = start => `<h2>${escapeHtml(sourceName(group.id))}</h2><p>${group.status === "cache" ? "缓存 · " : ""}API 时间：${formatDate(group.updatedTime)}（北京时间）</p><ol start="${start}">`
+    let start = 1
+    let entries = ""
+    let count = 0
+    group.items.forEach((item, index) => {
+      const entry = `<li><a href="${escapeHtml(item.url)}">${escapeHtml(text(item.title, 180))}</a>${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}</li>`
+      if (`${heading(start)}${entries}${entry}</ol>`.length > bodyBudget) {
+        if (count) blocks.push({ body: `${heading(start)}${entries}</ol>`, itemCount: count })
+        start = index + 1
+        entries = ""
+        count = 0
+      }
+      if (`${heading(start)}${entry}</ol>`.length > bodyBudget) {
+        throw new Error("A news item exceeds the PushPlus content limit; nothing was sent.")
+      }
+      entries += entry
+      count += 1
+    })
+    if (count) blocks.push({ body: `${heading(start)}${entries}</ol>`, itemCount: count })
+  }
+  const pages = []
+  let page = { body: "", itemCount: 0 }
+  for (const block of blocks) {
+    if (page.body.length + block.body.length > bodyBudget) {
+      pages.push(page)
+      page = { body: "", itemCount: 0 }
+    }
+    page.body += block.body
+    page.itemCount += block.itemCount
+  }
+  if (page.itemCount) pages.push(page)
+  const messages = pages.map((part, index) => ({
+    title: pages.length > 1 ? `${title} · ${index + 1}/${pages.length}` : title,
+    content: `${header}${pages.length > 1 ? `<p>分段 ${index + 1}/${pages.length}</p>` : ""}${part.body}${footer}`,
+    itemCount: part.itemCount,
+  }))
+  if (messages.some(message => message.content.length > MAX_CONTENT_LENGTH)) {
+    throw new Error("Digest exceeds the PushPlus content limit; nothing was sent.")
+  }
+  return { title, content: messages.map(message => message.content).join(""), messages, itemCount, sourceCounts, failedSources }
 }
 
 function renderPreview(digest) {
@@ -180,8 +206,18 @@ export async function runDigest({ env = process.env, fetchImpl = fetch, now = Da
       throw new Error("Preview output could not be written.")
     }
   }
-  if (!dryRun) await sendPushPlus(digest, token, fetchImpl)
-  return { ...digest, pushAccepted: !dryRun }
+  let acceptedParts = 0
+  if (!dryRun) {
+    for (const [index, message] of digest.messages.entries()) {
+      try {
+        await sendPushPlus(message, token, fetchImpl)
+        acceptedParts += 1
+      } catch {
+        throw new Error(`PushPlus part ${index + 1}/${digest.messages.length} failed; ${acceptedParts} part(s) accepted, ${digest.messages.length - index - 1} later part(s) not attempted. Delivery status of the failed part is unknown. Do not retry automatically.`)
+      }
+    }
+  }
+  return { ...digest, acceptedParts, pushAccepted: !dryRun }
 }
 
 async function main() {
@@ -194,8 +230,9 @@ async function main() {
     else throw new Error("Usage: node scripts/wechat-digest.mjs [--dry-run] [--output path]")
   }
   const result = await runDigest({ dryRun, output })
-  if (dryRun) console.log(output ? "Preview saved." : renderPreview(result))
-  else console.log("PushPlus accepted the message; WeChat delivery must be confirmed.")
+  if (dryRun) console.log(output ? `Preview saved: ${result.itemCount} items in ${result.messages.length} part(s).` : renderPreview(result))
+  else console.log(`PushPlus accepted ${result.acceptedParts} part(s), containing ${result.itemCount} items; WeChat delivery must be confirmed.`)
+  if (output || !dryRun) console.log(`Source counts: ${JSON.stringify(result.sourceCounts)}`)
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
