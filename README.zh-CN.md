@@ -33,6 +33,10 @@
 
 你可以将 `BASE_URL` 修改为你的域名。
 
+## 微信早报
+
+支持使用 GitHub Actions 每天北京时间 09:00 通过 PushPlus 向个人微信发送新闻汇总。配置和验证步骤见 [微信早报接入文档](docs/wechat-digest.zh-CN.md)。
+
 ## 部署指南
 
 ### 基础部署

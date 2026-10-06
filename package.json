@@ -22,7 +22,10 @@
     "release": "bumpp",
     "prepare": "simple-git-hooks",
     "log": "wrangler pages deployment tail --project-name newsnow",
-    "test": "vitest -c vitest.config.ts"
+    "test": "vitest -c vitest.config.ts",
+    "digest": "node scripts/wechat-digest.mjs",
+    "digest:preview": "node scripts/wechat-digest.mjs --dry-run",
+    "test:digest": "vitest -c vitest.config.ts run test/wechat-digest.test.mjs"
   },
   "dependencies": {
     "@atlaskit/pragmatic-drag-and-drop": "^1.7.7",
