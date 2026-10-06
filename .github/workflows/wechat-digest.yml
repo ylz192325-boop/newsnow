@@ -94,7 +94,7 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: |
           pnpm digest
-          echo 'PushPlus accepted the request. Confirm receipt in WeChat; API acceptance does not confirm delivery.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'PushPlus accepted all digest parts. Confirm receipt in WeChat; API acceptance does not confirm delivery.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save preview
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
