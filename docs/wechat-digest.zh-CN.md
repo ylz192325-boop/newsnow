@@ -1,6 +1,10 @@
 # 每天 9 点发送 NewsNow 微信早报
 
-每天北京时间 09:00，由 GitHub Actions 临时启动 NewsNow，采集当前新闻列表，按来源汇总去重后，通过 PushPlus 发送到个人微信。默认包括澎湃新闻、华尔街见闻、财联社电报、IT之家，每个来源最多 5 条，并保留原文链接。当前版本提供标题及可用简介汇总，没有调用大模型，也不保证覆盖过去 24 小时的全部新闻。
+更新日期：2026-10-06。
+
+每天北京时间 09:00，由 GitHub Actions 临时启动 NewsNow，采集当前来源列表，通过 PushPlus 发送到个人微信。默认包括澎湃新闻、华尔街见闻、财联社电报、IT之家、Polymarket、Hacker News、环球网、Bloomberg、掘金、GeekNews，每个来源最多 20 条，并保留原文链接。来源内去重；同一新闻出现在不同来源时，保留各自归属。来源不足 20 条时按实际条数发送。
+
+提供标题及可用简介汇总，没有调用大模型，也不保证覆盖过去 24 小时的全部新闻。内容过长时按 HTML 长度拆成多条微信消息，标题标注 `1/N`、`2/N` 等段号，不为适配单条消息而省略已选新闻。
 
 工作流：`.github/workflows/wechat-digest.yml`。汇总脚本：`scripts/wechat-digest.mjs`。
 
@@ -17,8 +21,8 @@
 
 1. Fork [newsnext/newsnow](https://github.com/newsnext/newsnow)，把本功能的文件和 `package.json` 修改提交到 Fork 的默认分支（通常为 `main`）。定时任务仅运行默认分支的工作流。
 2. 在 Fork 的 **Actions** 页面启用工作流。Fork 的定时任务默认不会自动启用；如果提示禁用，打开 **Daily WeChat digest → Enable workflow**。
-3. 打开 **Daily WeChat digest → Run workflow**。第一次保留 `dry_run` 勾选，下载本次运行的 `wechat-digest-preview` artifact，查看 `digest.html` 的内容和来源状态。
-4. 再次运行，取消 `dry_run` 勾选。检查 **Send digest to PushPlus** 成功，并在个人微信中确认收到早报。
+3. 打开 **Daily WeChat digest → Run workflow**。第一次保留 `dry_run` 勾选，下载本次运行的 `wechat-digest-preview` artifact，查看 `digest.html`；该文件包含所有分段，检查各来源条数及暂不可用来源。
+4. 再次运行，取消 `dry_run` 勾选。检查 **Send digest to PushPlus** 成功，并在个人微信中确认收到全部分段；PushPlus 受理不等于微信送达。
 5. 之后每天北京时间 09:00 自动触发。cron 为 `0 1 * * *`，对应 UTC 01:00。安装、构建和抓取需要时间；GitHub 高峰可能延迟或漏掉排队任务，不能保证 09:00 准点送达。
 
 公开仓库 60 天没有活动时 GitHub 会自动禁用定时工作流，届时需要重新启用。不要用自动提交制造虚假活动。若必须准点且长期无人维护，使用常驻服务器定时器更合适。参见 [GitHub schedule 文档](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
@@ -29,12 +33,27 @@
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `NEWSNOW_SOURCES` | `thepaper,wallstreetcn-news,cls-telegraph,ithome` | 逗号分隔的 NewsNow 来源 ID |
-| `DIGEST_ITEMS_PER_SOURCE` | `5` | 每来源条数，范围 1–10 |
+| `NEWSNOW_SOURCES` | `thepaper,wallstreetcn-news,cls-telegraph,ithome,polymarket,hackernews,huanqiu,bloomberg,juejin,geeknews` | 逗号分隔的早报来源 ID，按填写顺序展示 |
+| `DIGEST_ITEMS_PER_SOURCE` | `20` | 每来源最多条数，范围 1–20 |
 
-脚本还接受 `NEWSNOW_BASE_URL`，默认 `http://127.0.0.1:3000`。工作流固定使用临时本地服务，避免依赖公共站点的 Cloudflare 和缓存。若手动运行脚本，可指向已有 NewsNow 实例；接口可能返回缓存，早报会标注接口时间和缓存状态。
+如果此前设置过四来源或每源 5 条的 repository variables，请修改或删除旧值；已有变量会覆盖新的默认配置。
+
+新增来源的取数口径：
+
+| 来源 ID | 来源与顺序 |
+| --- | --- |
+| `polymarket` | 官方 Gamma API，活跃且未关闭的市场，按累计成交额降序；不是 24 小时成交额榜 |
+| `hackernews` | NewsNow 原生 Hacker News 来源列表 |
+| `huanqiu` | 环球网官方首页文章，保留首页编辑顺序，不表示热度排名 |
+| `bloomberg` | Bloomberg 官方 Markets RSS，保留 feed 顺序 |
+| `juejin` | NewsNow 原生掘金来源列表 |
+| `geeknews` | GeekNews（`news.hada.io`）官方 Atom，保留 feed 顺序 |
+
+脚本还接受 `NEWSNOW_BASE_URL`，默认 `http://127.0.0.1:3000`。工作流固定使用临时本地服务读取 NewsNow 原生来源，避免依赖公共实例的 Cloudflare 和缓存。若手动运行脚本，可指向已有 NewsNow 实例；接口可能返回缓存，早报会标注接口时间和缓存状态。Polymarket、环球网、Bloomberg、GeekNews 由 `scripts/wechat-digest-sources.mjs` 直接读取公开接口，不受 `NEWSNOW_BASE_URL` 影响，也不注册到 NewsNow 前端。
 
 原站新闻源可能失败。部分失败会在早报中注明；所有来源都失败、数据过旧或没有可用新闻时，不发送空早报，工作流失败。采集时间不代表每篇文章的发布时间。
+
+脚本先生成并检查全部分段，再依次发送，每段 HTML 最多 19,999 个字符。单条新闻无法装入一段时，整个生成阶段失败，不开始发送。某段发送失败时立即停止，报告此前已受理的段数（`acceptedParts`）和后续未尝试的段数；失败段的实际送达可能不明，不自动重发。不要直接重跑整份早报，以免重复发送已受理分段。
 
 ## 本地验证
 
@@ -53,13 +72,15 @@ HOST=127.0.0.1 PORT=3000 ENABLE_CACHE=false INIT_TABLE=false node dist/output/se
 pnpm digest:preview --output /tmp/newsnow-digest.html
 ```
 
+预览文件包含全部分段。终端会输出总条数、分段数和 `Source counts`，来源少于上限或失败时查看实际条数；不要仅凭默认配置认定十个来源均可用。Polymarket 若遇到本地 TLS 连接错误，应先通过 GitHub Actions 的 `dry_run` 核实云端访问情况。
+
 真实发送前，通过自己的安全凭据方式设置 `PUSHPLUS_TOKEN` 环境变量，再运行 `pnpm digest`。不要把 token 明文放入命令行历史或 `.env` 文件。
 
 ## 故障处理
 
 - **缺少 token**：新增 `PUSHPLUS_TOKEN` repository secret；变量名称必须完全一致。
 - **PushPlus 拒绝请求**：日志只输出通用失败说明，不输出可能含凭据的响应。详细状态码在 PushPlus 后台查看：常见 `903` 是 token 错误、`905` 是未实名、`900` 是用户受限。参见 [状态码说明](https://www.pushplus.plus/doc/guide/code.html)。
-- **请求已接受但微信没收到**：`code=200` 只表示 PushPlus 接受请求，不能证明微信送达。检查 PushPlus 的消息记录、账号状态和微信通知设置。自动查询送达状态还需要额外 OpenAPI 凭据和 IP 白名单，本实现不要求这些权限。
-- **请求超时或返回不明确**：不自动重试发送，避免重复早报。先查 PushPlus 记录，确认未收到后再手动运行；手动重新运行可能重复发送。
+- **请求已接受但微信没收到**：`code=200` 只表示 PushPlus 接受该段请求，不能证明微信送达。按标题的 `1/N` 等段号核对是否收到全部分段，再检查 PushPlus 的消息记录、账号状态和微信通知设置。自动查询送达状态还需要额外 OpenAPI 凭据和 IP 白名单，本实现不要求这些权限。
+- **部分分段失败、请求超时或返回不明确**：脚本会停止并报告已受理段数和未尝试段数，不自动重试。先查 PushPlus 记录和微信收件情况；直接重跑会从第一段重新发送，可能造成重复。
 - **来源失败**：查看早报的缺失来源及 Actions 的 API diagnostics。临时服务取消缓存，但原站仍可能限制访问。
 - **Actions 全绿但未准时**：检查实际触发、构建和发送时刻。需要严格 09:00 时换用服务器。
